@@ -15,9 +15,9 @@
 
   <style>
     html, body {
-      margin: 0; 
+      margin: 0;
       padding: 0;
-      width: 100%; 
+      width: 100%;
       height: 100%;
       background: #FAF8F0;
       overflow: hidden;
@@ -30,12 +30,10 @@
       background: transparent;
     }
 
-    /* Top bar with "Soundmirror" and the controls */
+    /* Top bar */
     .top-bar {
       position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
+      top: 0; left: 0; right: 0;
       height: 50px;
       display: flex;
       align-items: center;
@@ -68,62 +66,50 @@
       text-decoration: underline;
     }
 
-    /* We remove the "Volume" text around the slider */
+    /* Hide the label for the volume slider */
     .controls label {
-      display: none; /* Hides the label entirely */
+      display: none;
     }
     .controls input[type="range"] {
-  /* Basic styling shared across all browsers */
-  -webkit-appearance: none; /* remove default styling in WebKit */
-  appearance: none;
-  width: 50px;         /* example width: 50px */
-  height: 4px;         /* track height */
-  background: #000;    /* fallback background in some cases */
-  cursor: pointer;
-  margin-left: 0.5rem; /* your existing spacing */
-}
-
-/* For Chrome, Safari, Opera: slider track */
-.controls input[type="range"]::-webkit-slider-runnable-track {
-  background: #000;
-  height: 4px;
-}
-
-/* Slider thumb (the “knob”) for WebKit */
-.controls input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;     /* white thumb */
-  border: 2px solid #000;
-  cursor: pointer;
-  margin-top: -5px;     /* centers the thumb with the track */
-}
-
-/* For Firefox: track */
-.controls input[type="range"]::-moz-range-track {
-  background: #000;
-  height: 4px;
-}
-
-/* For Firefox: thumb */
-.controls input[type="range"]::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid #000;
-  cursor: pointer;
-}
+      -webkit-appearance: none;
+      appearance: none;
+      width: 50px;
+      height: 4px;
+      background: #000;
+      cursor: pointer;
+      margin-left: 0.5rem;
+    }
+    .controls input[type="range"]::-webkit-slider-runnable-track {
+      background: #000;
+      height: 4px;
+    }
+    .controls input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #000;
+      cursor: pointer;
+      margin-top: -5px;
+    }
+    .controls input[type="range"]::-moz-range-track {
+      background: #000;
+      height: 4px;
+    }
+    .controls input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #000;
+      cursor: pointer;
+    }
 
     /* Modal overlay with frosted glass effect */
     .modal-overlay {
       position: absolute;
-      top: 0; 
-      left: 0; 
-      width: 100%; 
-      height: 100%;
+      top: 0; left: 0; width: 100%; height: 100%;
       background: rgba(255,255,255,0.3);
       backdrop-filter: blur(10px);
       display: flex;
@@ -165,9 +151,8 @@
     <div class="controls">
       <button id="restartBtn">Restart</button>
       <button id="muteBtn">Mute</button>
-      <!-- Hidden label; only the slider remains -->
-      <label><!-- hidden --></label>
-      <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="1" />
+      <label></label>
+      <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="1"/>
     </div>
   </div>
 
@@ -177,7 +162,8 @@
   <!-- Modal -->
   <div class="modal-overlay" id="modalOverlay">
     <div class="modal-content" id="modalContent">
-      <p>Audio on.<br/>Tap or click to begin</p>
+      <!-- Preloader text -->
+      <p id="loadingMsg">Loading ...</p>
     </div>
   </div>
 
@@ -185,490 +171,173 @@
   <div class="debug-panel" id="debugPanel"></div>
 
   <script>
-    // ===================== GLOBAL / AUDIO POOL SETUP =====================
-    const MAX_TRACKS = 40;  // Up to 40 .mp3 files
+    // ===================== MASTER COMPRESSOR & LIMITER VIA WEB AUDIO =====================
+    let audioContext = null;
+    let masterCompressor = null;
+    let masterLimiter = null;
 
-    let audioPool = []; // each element: { audio, inUse }
+    function setupMasterChain(){
+      if(!audioContext) return;
 
-    function loadAllAudio() {
-      const promises = [];
-      for (let i = 0; i < MAX_TRACKS; i++) {
-        promises.push(new Promise((resolve) => {
-          // Switch from .wav to .mp3
-          const audio = new Audio(`music/${i+1}.mp3`);
-          audio.addEventListener('canplaythrough', () => {
-            resolve({ index: i, audio });
+      // Create mild compressor
+      masterCompressor = audioContext.createDynamicsCompressor();
+      masterCompressor.threshold.value = -18;
+      masterCompressor.knee.value = 6;
+      masterCompressor.ratio.value = 3;
+      masterCompressor.attack.value = 0.01;
+      masterCompressor.release.value = 0.25;
+
+      // Create limiter
+      masterLimiter = audioContext.createDynamicsCompressor();
+      masterLimiter.threshold.value = -3;
+      masterLimiter.knee.value = 0;
+      masterLimiter.ratio.value = 20;
+      masterLimiter.attack.value = 0.003;
+      masterLimiter.release.value = 0.25;
+
+      masterCompressor.connect(masterLimiter);
+      masterLimiter.connect(audioContext.destination);
+    }
+
+    // We'll store only the `.src` in the audioPool, not the actual <audio> element,
+    // to avoid reusing the same element across multiple circles.
+    // That way we don't get "HTMLMediaElement already connected" errors.
+    let audioPool = []; // { src, inUse }
+
+    // Preloader
+    let loadedAll = false;
+    const loadingMsg = document.getElementById("loadingMsg");
+    const MAX_TRACKS = 40;
+
+    function loadAllAudio(){
+      const tasks = [];
+      for(let i=0;i<MAX_TRACKS;i++){
+        tasks.push(new Promise(resolve=>{
+          const testAudio = new Audio(`music/${i+1}.mp3`);
+          testAudio.addEventListener('canplaythrough',()=>{
+            resolve({ index:i, src: testAudio.src }); 
           });
-          audio.addEventListener('error', () => {
+          testAudio.addEventListener('error',()=>{
             console.log(`Error loading track #${i+1}`);
-            resolve({ index: i, audio: null });
+            resolve({ index:i, src:null });
           });
-          audio.load();
+          testAudio.load();
         }));
       }
-      return Promise.all(promises).then(results => {
-        audioPool = new Array(MAX_TRACKS).fill(null).map((_, i) => {
-          const found = results.find(r => r.index === i);
+      return Promise.all(tasks).then(results=>{
+        audioPool=new Array(MAX_TRACKS).fill(null).map((_,i)=>{
+          let found = results.find(r=>r.index===i);
           return {
-            audio: found?.audio || null,
-            inUse: false,
+            src: found?.src || null,
+            inUse: false
           };
         });
+        loadedAll = true;
+        loadingMsg.textContent = "Audio on.\nTap or click to begin";
       });
     }
 
-    function getRandomFreeTrackIndex() {
-      const freeIndices = [];
-      audioPool.forEach((t, i) => {
-        if (t.audio && !t.inUse) freeIndices.push(i);
+    function getRandomFreeTrackIndex(){
+      const freeIndices=[];
+      audioPool.forEach((t,i)=>{
+        if(t.src && !t.inUse) freeIndices.push(i);
       });
-      if (freeIndices.length === 0) return -1;
-      const rnd = Math.floor(Math.random() * freeIndices.length);
+      if(!freeIndices.length) return -1;
+      const rnd=Math.floor(Math.random()*freeIndices.length);
       return freeIndices[rnd];
     }
 
-    // ===================== CONFIGURABLE SETTINGS =====================
-    const NUM_CIRCLES            = 9;
-    const FADE_DURATION          = 2000; // ms
-    const FADE_STEPS             = 30;
-    const WIND_INTERVAL          = 5000;
-    const WIND_MAX_SPEED         = 0.2;
-    const COLLISION_PULSE_RADIUS_SPEED = 1.5;
-    const COLLISION_PULSE_ALPHA_DECAY  = 0.02;
-    const MAX_SPEED              = 2.5;
-    const LOOP_CROSSFADE         = 1.0; // seconds for crossfade
-    const GLOBAL_VOLUME_CAP      = 0.9; // never exceed 0.9 to prevent clipping
+    // ===================== CONFIG =====================
+    const NUM_CIRCLES=9;
+    const FADE_DURATION=2000;
+    const FADE_STEPS=30;
+    const WIND_INTERVAL=5000;
+    const WIND_MAX_SPEED=0.2;
+    const COLLISION_PULSE_RADIUS_SPEED=1.5;
+    const COLLISION_PULSE_ALPHA_DECAY=0.02;
+    const MAX_SPEED=2.5;
+    const LOOP_CROSSFADE=1.0;
+    const GLOBAL_VOLUME_CAP=0.9;
 
-    // We'll fade scene from alpha=0 -> 1 after user clicks
-    let globalAlpha = 0;
+    let globalAlpha=0;
+    let isMuted=false;
+    let globalVolumeSlider=1.0;
+    let debugVisible=false;
 
-    // Mute toggle
-    let isMuted = false;
-    // Overall volume slider [0..1], we clamp at 0.9
-    let globalVolumeSlider = 1.0;
+    const COLOR_FILL={r:200,g:175,b:53}; 
+    const COLOR_STROKE='#1B1B1B';
 
-    // Hide debug panel by default, toggle with 'd'
-    let debugVisible = false;
-
-    // For color crossfade
-    const COLOR_FILL   = { r: 200, g: 175, b: 53 }; // #C8AF35
-    const COLOR_STROKE = '#1B1B1B';
-
-    // ===================== CANVAS SETUP =====================
-    const canvas = document.getElementById('ambientCanvas');
-    const ctx = canvas.getContext('2d');
+    // ===================== CANVAS =====================
+    const canvas=document.getElementById("ambientCanvas");
+    const ctx=canvas.getContext("2d");
     let width, height;
 
-    function resizeCanvas() {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      canvas.width = width;
-      canvas.height = height;
+    function resizeCanvas(){
+      width=window.innerWidth;
+      height=window.innerHeight;
+      canvas.width=width;
+      canvas.height=height;
     }
-    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('resize',resizeCanvas);
     resizeCanvas();
 
-    // ===================== PULSE ANIMATION (COLLISIONS) =====================
-    let pulses = [];
-    function createPulse(x, y) {
-      pulses.push({ x, y, radius: 0, alpha: 0.6 });
+    // PULSES
+    let pulses=[];
+    function createPulse(x,y){
+      pulses.push({ x, y, radius:0, alpha:0.6 });
     }
-    function updatePulses() {
-      for (let i = pulses.length - 1; i >= 0; i--) {
-        const p = pulses[i];
-        p.radius += COLLISION_PULSE_RADIUS_SPEED;
-        p.alpha -= COLLISION_PULSE_ALPHA_DECAY;
-        if (p.alpha <= 0) pulses.splice(i, 1);
+    function updatePulses(){
+      for(let i=pulses.length-1;i>=0;i--){
+        pulses[i].radius+=COLLISION_PULSE_RADIUS_SPEED;
+        pulses[i].alpha-=COLLISION_PULSE_ALPHA_DECAY;
+        if(pulses[i].alpha<=0) pulses.splice(i,1);
       }
     }
-    function drawPulses() {
-      for (let p of pulses) {
+    function drawPulses(){
+      for(let p of pulses){
         ctx.save();
-        ctx.globalAlpha = p.alpha * globalAlpha;
+        ctx.globalAlpha=globalAlpha*p.alpha;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, p.radius, 0, Math.PI*2);
-        ctx.strokeStyle = COLOR_STROKE;
-        ctx.lineWidth = 2;
+        ctx.arc(p.x,p.y,p.radius,0,Math.PI*2);
+        ctx.strokeStyle=COLOR_STROKE;
+        ctx.lineWidth=2;
         ctx.stroke();
         ctx.restore();
       }
     }
 
-    // ===================== WIND (RANDOM DRIFT) =====================
-    let wind = { vx: 0, vy: 0 };
-    function setRandomWind() {
-      wind.vx = (Math.random() - 0.5)*WIND_MAX_SPEED*2;
-      wind.vy = (Math.random() - 0.5)*WIND_MAX_SPEED*2;
+    // WIND
+    let wind={ vx:0, vy:0 };
+    function setRandomWind(){
+      wind.vx=(Math.random()-0.5)*WIND_MAX_SPEED*2;
+      wind.vy=(Math.random()-0.5)*WIND_MAX_SPEED*2;
     }
     setRandomWind();
     setInterval(setRandomWind, WIND_INTERVAL);
 
-    // ===================== CIRCLE CLASS =====================
-    class Circle {
-      constructor(index) {
-        this.index = index; // so we can show circle # in debug
-        const minDim = Math.min(width, height);
-        this.baseRadius = minDim * 0.06; // normal radius
-        this.radius = this.baseRadius;
-
-        this.x = 0;
-        this.y = 0;
-        this.vx = (Math.random() - 0.5)*0.4;
-        this.vy = (Math.random() - 0.5)*0.4;
-
-        this.isDragging = false;
-        this.isPressed = false; // pointer down on this circle
-
-        // Crossfade states
-        this.fillAlpha   = 0; // 0 => off, 1 => on
-        this.strokeAlpha = 1;
-        this.isFadingUp   = false;
-        this.isFadingDown = false;
-        this.fadeInterval = null;
-
-        // Audio
-        this.trackIndex   = -1;
-        this.audio        = null;
-        this.timesToPlay  = 1;  // random 1..5
-        this.timesPlayed  = 0;  // how many times user turned this circle on
-
-        // For loop crossfading
-        this.loopCrossfading = false;
-      }
-
-      setTrack(trackIndex) {
-        this.releaseTrack();
-
-        this.trackIndex = trackIndex;
-        audioPool[trackIndex].inUse = true;
-        this.audio = audioPool[trackIndex].audio;
-        if (!this.audio) return; // might be null if file didn't load
-
-        // pick random times 1..5
-        this.timesToPlay = Math.floor(Math.random()*5) + 1;
-        this.timesPlayed = 0; // reset usage count
-
-        this.audio.loop = false;
-        this.audio.currentTime = 0;
-        this.audio.volume = 0;
-
-        // fade out near end if circle is on
-        this.audio.ontimeupdate = () => {
-          if (!this.audio || !this.isOn()) return;
-          const remain = this.audio.duration - this.audio.currentTime;
-          if (remain <= LOOP_CROSSFADE && !this.loopCrossfading) {
-            this.startLoopFadeOut();
-          }
-        };
-        // crossfade in next loop
-        this.audio.onended = () => {
-          this.loopCrossfading = false;
-          // If still on => fade in from start
-          if (this.isOn() && !isMuted) {
-            this.audio.currentTime = 0;
-            this.startLoopFadeIn();
-            this.audio.play().catch(()=>{});
-          } else {
-            // do nothing
-            this.audio.currentTime = 0;
-            this.audio.volume = 0;
-          }
-        };
-      }
-
-      releaseTrack() {
-        if (this.trackIndex >= 0) {
-          audioPool[this.trackIndex].inUse = false;
-        }
-        this.trackIndex = -1;
-        if (this.audio) {
-          this.audio.ontimeupdate = null;
-          this.audio.onended = null;
-        }
-        this.audio = null;
-      }
-
-      pickRandomTrack() {
-        const idx = getRandomFreeTrackIndex();
-        if (idx < 0) {
-          console.warn("No free tracks available!");
-          return;
-        }
-        this.setTrack(idx);
-      }
-
-      // Called each time we near track end while isOn()
-      startLoopFadeOut() {
-        this.loopCrossfading = true;
-        if (!this.audio) return;
-        const startVol = this.audio.volume;
-        const endVol = 0;
-        const steps = 20;
-        const stepTime = (LOOP_CROSSFADE * 1000)/steps;
-
-        let count = 0;
-        const intv = setInterval(() => {
-          count++;
-          const r = count/steps;
-          let newVol = startVol + (endVol - startVol)*r;
-          newVol = Math.min(newVol, GLOBAL_VOLUME_CAP); // clamp
-          newVol = Math.min(newVol, globalVolumeSlider); 
-          this.audio.volume = Math.max(0, newVol);
-          if (count >= steps) clearInterval(intv);
-        }, stepTime);
-      }
-
-      // Called if track ended but circle is still "on"
-      startLoopFadeIn() {
-        if (!this.audio) return;
-        const startVol = 0;
-        const endVol = (isMuted ? 0 : Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP));
-        const steps = 20;
-        const stepTime = (LOOP_CROSSFADE * 1000)/steps;
-
-        let count = 0;
-        const intv = setInterval(() => {
-          count++;
-          const r = count/steps;
-          let newVol = startVol + (endVol - startVol)*r;
-          this.audio.volume = Math.max(0, Math.min(newVol, 1));
-          if (count >= steps) clearInterval(intv);
-        }, stepTime);
-      }
-
-      isOn() {
-        return this.fillAlpha > 0.5;
-      }
-
-      // If user toggles circle from off->on, we increment timesPlayed
-      incrementPlays() {
-        this.timesPlayed++;
-        if (this.timesPlayed >= this.timesToPlay) {
-          // pick new track
-          this.pickRandomTrack();
-        }
-      }
-
-      update() {
-        if (!this.isDragging) {
-          this.vx += wind.vx * 0.01;
-          this.vy += wind.vy * 0.01;
-        }
-        this.x += this.vx;
-        this.y += this.vy;
-
-        // limit speed
-        const spd = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
-        if (spd > MAX_SPEED) {
-          const ratio = MAX_SPEED/spd;
-          this.vx *= ratio;
-          this.vy *= ratio;
-        }
-
-        this.checkEdges();
-      }
-
-      draw(ctx) {
-        ctx.save();
-        ctx.globalAlpha = globalAlpha;
-        ctx.beginPath();
-        ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
-
-        // stroke
-        if (this.strokeAlpha > 0) {
-          ctx.save();
-          ctx.globalAlpha *= this.strokeAlpha;
-          ctx.lineWidth = 4;
-          ctx.strokeStyle = COLOR_STROKE;
-          ctx.stroke();
-          ctx.restore();
-        }
-        // fill
-        if (this.fillAlpha > 0) {
-          ctx.save();
-          ctx.globalAlpha *= this.fillAlpha;
-          ctx.fillStyle = `rgb(${COLOR_FILL.r}, ${COLOR_FILL.g}, ${COLOR_FILL.b})`;
-          ctx.fill();
-          ctx.restore();
-        }
-
-        // If debug is visible, show circle index
-        if (debugVisible) {
-          ctx.save();
-          ctx.fillStyle = "#000";
-          ctx.font = "16px sans-serif";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(this.index.toString(), this.x, this.y);
-          ctx.restore();
-        }
-
-        ctx.restore();
-      }
-
-      checkEdges() {
-        let collided = false;
-        if (this.x - this.radius < 0) {
-          this.x = this.radius;
-          this.vx *= -1;
-          collided = true;
-        } else if (this.x + this.radius > width) {
-          this.x = width - this.radius;
-          this.vx *= -1;
-          collided = true;
-        }
-        if (this.y - this.radius < 0) {
-          this.y = this.radius;
-          this.vy *= -1;
-          collided = true;
-        } else if (this.y + this.radius > height) {
-          this.y = height - this.radius;
-          this.vy *= -1;
-          collided = true;
-        }
-        if (collided) {
-          this.toggleVolume();
-        }
-      }
-
-      toggleVolume() {
-        if (this.fillAlpha < 0.5) this.fadeUp();
-        else this.fadeDown();
-      }
-
-      fadeUp() {
-        if (!this.audio) return;
-        if (this.isFadingUp) return;
-        this.isFadingUp = true;
-        this.isFadingDown = false;
-
-        if (this.fadeInterval) {
-          clearInterval(this.fadeInterval);
-          this.fadeInterval = null;
-        }
-
-        // We count this as a "play"
-        this.incrementPlays();
-
-        let startVol   = this.audio.volume;
-        let endVol     = (isMuted ? 0 : Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP));
-        let startFill  = this.fillAlpha;
-        let endFill    = 1;
-        let startStroke= this.strokeAlpha;
-        let endStroke  = 0;
-
-        const total = FADE_STEPS;
-        const stepTime = FADE_DURATION/total;
-        let step = 0;
-
-        this.audio.play().catch(()=>{});
-
-        this.fadeInterval = setInterval(() => {
-          step++;
-          const r = step/total;
-          let newVol = startVol + (endVol - startVol)*r;
-          newVol = Math.min(newVol, 1);
-          this.audio.volume = newVol;
-
-          this.fillAlpha = startFill + (endFill - startFill)*r;
-          this.strokeAlpha = startStroke + (endStroke - startStroke)*r;
-
-          if (step >= total) {
-            clearInterval(this.fadeInterval);
-            this.fadeInterval = null;
-            this.isFadingUp = false;
-          }
-        }, stepTime);
-      }
-
-      fadeDown() {
-        if (!this.audio) return;
-        if (this.isFadingDown) return;
-        this.isFadingUp = false;
-        this.isFadingDown = true;
-
-        if (this.fadeInterval) {
-          clearInterval(this.fadeInterval);
-          this.fadeInterval = null;
-        }
-
-        let startVol   = this.audio.volume;
-        let endVol     = 0;
-        let startFill  = this.fillAlpha;
-        let endFill    = 0;
-        let startStroke= this.strokeAlpha;
-        let endStroke  = 1;
-
-        const total = FADE_STEPS;
-        const stepTime = FADE_DURATION/total;
-        let step = 0;
-
-        this.fadeInterval = setInterval(() => {
-          step++;
-          const r = step/total;
-          let newVol = startVol + (endVol - startVol)*r;
-          this.audio.volume = Math.max(0, Math.min(newVol, 1));
-
-          this.fillAlpha = startFill + (endFill - startFill)*r;
-          this.strokeAlpha = startStroke + (endStroke - startStroke)*r;
-
-          if (step >= total) {
-            clearInterval(this.fadeInterval);
-            this.fadeInterval = null;
-            this.isFadingDown = false;
-          }
-        }, stepTime);
-      }
-    } // end Circle
-
-    // ===================== GLOBAL CIRCLES ARRAY =====================
-    let circles = [];
-
-    function createCircles() {
-      circles = [];
-      for (let i = 0; i < NUM_CIRCLES; i++) {
-        const c = new Circle(i);
-        circles.push(c);
-      }
-      randomizeCirclePositions();
-      separateOverlappingCircles();
-
-      // Assign random track to each circle
-      circles.forEach(circle => {
-        const idx = getRandomFreeTrackIndex();
-        if (idx < 0) {
-          console.warn("No free track for circle!");
-          return;
-        }
-        circle.setTrack(idx);
-      });
-    }
-
-    function randomizeCirclePositions() {
-      for (let c of circles) {
-        c.x = Math.random()*(width - 2*c.baseRadius) + c.baseRadius;
-        c.y = Math.random()*(height - 2*c.baseRadius) + c.baseRadius;
-        c.vx = (Math.random() - 0.5)*0.4;
-        c.vy = (Math.random() - 0.5)*0.4;
+    // RANDOMIZE + SEPARATE
+    function randomizeCirclePositions(){
+      for(let c of circles){
+        c.x=Math.random()*(width-2*c.baseRadius)+c.baseRadius;
+        c.y=Math.random()*(height-2*c.baseRadius)+c.baseRadius;
+        c.vx=(Math.random()-0.5)*0.4;
+        c.vy=(Math.random()-0.5)*0.4;
       }
     }
-
-    function separateOverlappingCircles() {
-      let overlapping = true;
-      let safetyCounter = 0;
-      while (overlapping && safetyCounter < 1000) {
-        overlapping = false;
-        for (let i = 0; i < circles.length; i++) {
-          for (let j = i+1; j < circles.length; j++) {
-            let c1 = circles[i];
-            let c2 = circles[j];
-            let dx = c2.x - c1.x;
-            let dy = c2.y - c1.y;
-            let dist = Math.sqrt(dx*dx + dy*dy);
-            if (dist < c1.radius + c2.radius) {
-              overlapping = true;
-              c2.x = Math.random()*(width - 2*c2.baseRadius) + c2.baseRadius;
-              c2.y = Math.random()*(height - 2*c2.baseRadius) + c2.baseRadius;
+    function separateOverlappingCircles(){
+      let overlapping=true;
+      let safetyCounter=0;
+      while(overlapping && safetyCounter<1000){
+        overlapping=false;
+        for(let i=0;i<circles.length;i++){
+          for(let j=i+1;j<circles.length;j++){
+            let c1=circles[i], c2=circles[j];
+            let dx=c2.x-c1.x, dy=c2.y-c1.y;
+            let dist=Math.sqrt(dx*dx+dy*dy);
+            if(dist < c1.radius+c2.radius){
+              overlapping=true;
+              c2.x=Math.random()*(width-2*c2.baseRadius)+c2.baseRadius;
+              c2.y=Math.random()*(height-2*c2.baseRadius)+c2.baseRadius;
             }
           }
         }
@@ -676,269 +345,566 @@
       }
     }
 
-    // ===================== COLLISION DETECTION =====================
-    function checkCollisions() {
-      for (let i = 0; i < circles.length; i++) {
-        for (let j = i+1; j < circles.length; j++) {
-          let c1 = circles[i];
-          let c2 = circles[j];
-          let dx = c2.x - c1.x;
-          let dy = c2.y - c1.y;
-          let dist = Math.sqrt(dx*dx + dy*dy);
-          let minDist = c1.radius + c2.radius;
-          if (dist < minDist) {
-            // toggle each
+    // ===================== CIRCLE CLASS =====================
+    class Circle {
+      constructor(index){
+        this.index=index;
+        const minDim=Math.min(width,height);
+        this.baseRadius=minDim*0.06;
+        this.radius=this.baseRadius;
+
+        this.x=0; this.y=0;
+        this.vx=(Math.random()-0.5)*0.4;
+        this.vy=(Math.random()-0.5)*0.4;
+
+        this.isDragging=false;
+        this.isPressed=false;
+
+        this.fillAlpha=0;
+        this.strokeAlpha=1;
+        this.isFadingUp=false;
+        this.isFadingDown=false;
+        this.fadeInterval=null;
+
+        this.trackIndex=-1;
+        this.audio=null; // brand-new <audio> each time
+        this.mediaSource=null;
+        this.timesToPlay=1;
+        this.timesPlayed=0;
+        this.loopCrossfading=false;
+      }
+
+      setTrack(idx){
+        this.releaseTrack();
+        audioPool[idx].inUse=true;
+        this.trackIndex=idx;
+
+        let trackSrc = audioPool[idx].src;
+        if(!trackSrc){
+          console.warn("No src for trackIndex=",idx);
+          return;
+        }
+        // create a brand-new <audio> element with that src
+        this.audio = new Audio(trackSrc);
+        this.audio.loop=false;
+        this.audio.currentTime=0;
+        this.audio.volume=0;
+
+        // if audioContext and chain exist => connect
+        if(audioContext && masterCompressor && masterLimiter){
+          this.mediaSource = audioContext.createMediaElementSource(this.audio);
+          this.mediaSource.connect(masterCompressor);
+        }
+
+        // random 1..5
+        this.timesToPlay=Math.floor(Math.random()*5)+1;
+        this.timesPlayed=0;
+
+        this.audio.ontimeupdate=()=>{
+          if(!this.audio||!this.isOn())return;
+          const remain=this.audio.duration - this.audio.currentTime;
+          if(remain<=LOOP_CROSSFADE && !this.loopCrossfading){
+            this.startLoopFadeOut();
+          }
+        };
+        this.audio.onended=()=>{
+          this.loopCrossfading=false;
+          if(this.isOn() && !isMuted){
+            this.audio.currentTime=0;
+            this.startLoopFadeIn();
+            this.audio.play().catch(()=>{});
+          }else{
+            this.audio.currentTime=0;
+            this.audio.volume=0;
+          }
+        };
+      }
+
+      releaseTrack(){
+        if(this.trackIndex>=0){
+          audioPool[this.trackIndex].inUse=false;
+        }
+        this.trackIndex=-1;
+        if(this.audio){
+          this.audio.ontimeupdate=null;
+          this.audio.onended=null;
+        }
+        this.audio=null;
+        if(this.mediaSource){
+          try{this.mediaSource.disconnect();}catch(e){}
+          this.mediaSource=null;
+        }
+      }
+
+      pickRandomTrack(){
+        const idx=getRandomFreeTrackIndex();
+        if(idx<0){
+          console.warn("No free track available!");
+          return;
+        }
+        this.setTrack(idx);
+      }
+
+      startLoopFadeOut(){
+        this.loopCrossfading=true;
+        if(!this.audio)return;
+        let startVol=this.audio.volume;
+        let endVol=0;
+        const steps=20;
+        let count=0;
+        const stepTime=(LOOP_CROSSFADE*1000)/steps;
+        const intv=setInterval(()=>{
+          count++;
+          let r=count/steps;
+          let newVol=startVol+(endVol-startVol)*r;
+          newVol=Math.min(newVol,GLOBAL_VOLUME_CAP);
+          newVol=Math.min(newVol,globalVolumeSlider);
+          this.audio.volume=Math.max(0,newVol);
+          if(count>=steps){
+            clearInterval(intv);
+          }
+        },stepTime);
+      }
+
+      startLoopFadeIn(){
+        if(!this.audio)return;
+        let startVol=0;
+        let endVol=(isMuted?0:Math.min(globalVolumeSlider,GLOBAL_VOLUME_CAP));
+        const steps=20;
+        const stepTime=(LOOP_CROSSFADE*1000)/steps;
+        let count=0;
+        const intv=setInterval(()=>{
+          count++;
+          let r=count/steps;
+          let newVol=startVol+(endVol-startVol)*r;
+          this.audio.volume=Math.max(0,Math.min(newVol,1));
+          if(count>=steps) clearInterval(intv);
+        },stepTime);
+      }
+
+      isOn(){
+        return this.fillAlpha>0.5;
+      }
+      incrementPlays(){
+        this.timesPlayed++;
+        if(this.timesPlayed>=this.timesToPlay){
+          this.pickRandomTrack();
+        }
+      }
+      update(){
+        if(!this.isDragging){
+          this.vx+=wind.vx*0.01;
+          this.vy+=wind.vy*0.01;
+        }
+        this.x+=this.vx;
+        this.y+=this.vy;
+
+        let spd=Math.sqrt(this.vx*this.vx+this.vy*this.vy);
+        if(spd>MAX_SPEED){
+          let ratio=MAX_SPEED/spd;
+          this.vx*=ratio; 
+          this.vy*=ratio;
+        }
+        this.checkEdges();
+      }
+      draw(ctx){
+        ctx.save();
+        ctx.globalAlpha=globalAlpha;
+        ctx.beginPath();
+        ctx.arc(this.x,this.y,this.radius,0,Math.PI*2);
+
+        if(this.strokeAlpha>0){
+          ctx.save();
+          ctx.globalAlpha*=this.strokeAlpha;
+          ctx.lineWidth=4;
+          ctx.strokeStyle="#1B1B1B";
+          ctx.stroke();
+          ctx.restore();
+        }
+        if(this.fillAlpha>0){
+          ctx.save();
+          ctx.globalAlpha*=this.fillAlpha;
+          ctx.fillStyle=`rgb(${COLOR_FILL.r}, ${COLOR_FILL.g}, ${COLOR_FILL.b})`;
+          ctx.fill();
+          ctx.restore();
+        }
+
+        if(debugVisible){
+          ctx.save();
+          ctx.fillStyle="#000";
+          ctx.font="16px sans-serif";
+          ctx.textAlign="center";
+          ctx.textBaseline="middle";
+          ctx.fillText(this.index,this.x,this.y);
+          ctx.restore();
+        }
+
+        ctx.restore();
+      }
+      checkEdges(){
+        let collided=false;
+        if(this.x-this.radius<0){
+          this.x=this.radius; this.vx*=-1; collided=true;
+        } else if(this.x+this.radius>width){
+          this.x=width-this.radius; this.vx*=-1; collided=true;
+        }
+        if(this.y-this.radius<0){
+          this.y=this.radius; this.vy*=-1; collided=true;
+        } else if(this.y+this.radius>height){
+          this.y=height-this.radius; this.vy*=-1; collided=true;
+        }
+        if(collided){
+          this.toggleVolume();
+        }
+      }
+      toggleVolume(){
+        if(this.fillAlpha<0.5) this.fadeUp();
+        else this.fadeDown();
+      }
+      fadeUp(){
+        if(!this.audio)return;
+        if(this.isFadingUp)return;
+        this.isFadingUp=true; this.isFadingDown=false;
+        if(this.fadeInterval){
+          clearInterval(this.fadeInterval);
+          this.fadeInterval=null;
+        }
+        this.incrementPlays();
+
+        let startVol=this.audio.volume;
+        let endVol=(isMuted?0:Math.min(globalVolumeSlider,GLOBAL_VOLUME_CAP));
+        let startFill=this.fillAlpha; let endFill=1;
+        let startStroke=this.strokeAlpha; let endStroke=0;
+
+        const total=FADE_STEPS;
+        const stepTime=FADE_DURATION/total;
+        let step=0;
+
+        this.audio.play().catch(()=>{});
+
+        this.fadeInterval=setInterval(()=>{
+          step++;
+          let r=step/total;
+          let newVol=startVol+(endVol-startVol)*r;
+          newVol=Math.min(newVol,1);
+          this.audio.volume=newVol;
+
+          this.fillAlpha=startFill+(endFill-startFill)*r;
+          this.strokeAlpha=startStroke+(endStroke-startStroke)*r;
+          if(step>=total){
+            clearInterval(this.fadeInterval);
+            this.fadeInterval=null;
+            this.isFadingUp=false;
+          }
+        },stepTime);
+      }
+      fadeDown(){
+        if(!this.audio)return;
+        if(this.isFadingDown)return;
+        this.isFadingUp=false; this.isFadingDown=true;
+        if(this.fadeInterval){
+          clearInterval(this.fadeInterval);
+          this.fadeInterval=null;
+        }
+        let startVol=this.audio.volume;
+        let endVol=0;
+        let startFill=this.fillAlpha; let endFill=0;
+        let startStroke=this.strokeAlpha; let endStroke=1;
+
+        const total=FADE_STEPS;
+        const stepTime=FADE_DURATION/total;
+        let step=0;
+
+        this.fadeInterval=setInterval(()=>{
+          step++;
+          let r=step/total;
+          let newVol=startVol+(endVol-startVol)*r;
+          this.audio.volume=Math.max(0,Math.min(newVol,1));
+
+          this.fillAlpha=startFill+(endFill-startFill)*r;
+          this.strokeAlpha=startStroke+(endStroke-startStroke)*r;
+          if(step>=total){
+            clearInterval(this.fadeInterval);
+            this.fadeInterval=null;
+            this.isFadingDown=false;
+          }
+        },stepTime);
+      }
+    }
+
+    let circles=[];
+
+    function createCircles(){
+      circles=[];
+      for(let i=0;i<NUM_CIRCLES;i++){
+        const c=new Circle(i);
+        circles.push(c);
+      }
+      randomizeCirclePositions();
+      separateOverlappingCircles();
+      circles.forEach(c=>{
+        const idx=getRandomFreeTrackIndex();
+        if(idx<0){
+          console.warn("No free track for circle!");
+          return;
+        }
+        c.setTrack(idx);
+      });
+    }
+
+    function checkCollisions(){
+      for(let i=0;i<circles.length;i++){
+        for(let j=i+1;j<circles.length;j++){
+          let c1=circles[i], c2=circles[j];
+          let dx=c2.x-c1.x, dy=c2.y-c1.y;
+          let dist=Math.sqrt(dx*dx+dy*dy);
+          let minDist=c1.radius+c2.radius;
+          if(dist<minDist){
             c1.toggleVolume();
             c2.toggleVolume();
 
-            // pulse
-            const midX = c1.x + dx/2;
-            const midY = c1.y + dy/2;
-            createPulse(midX, midY);
+            const midX=c1.x+dx/2, midY=c1.y+dy/2;
+            createPulse(midX,midY);
 
-            // basic elastic
-            let angle = Math.atan2(dy, dx);
-            let v1 = Math.sqrt(c1.vx*c1.vx + c1.vy*c1.vy);
-            let v2 = Math.sqrt(c2.vx*c2.vx + c2.vy*c2.vy);
-            let dir1 = Math.atan2(c1.vy, c1.vx);
-            let dir2 = Math.atan2(c2.vy, c2.vx);
+            let angle=Math.atan2(dy,dx);
+            let v1=Math.sqrt(c1.vx*c1.vx+c1.vy*c1.vy);
+            let v2=Math.sqrt(c2.vx*c2.vx+c2.vy*c2.vy);
+            let dir1=Math.atan2(c1.vy,c1.vx);
+            let dir2=Math.atan2(c2.vy,c2.vx);
 
-            let vx1 = v2*Math.cos(dir2 - angle);
-            let vy1 = v1*Math.sin(dir1 - angle);
-            let vx2 = v1*Math.cos(dir1 - angle);
-            let vy2 = v2*Math.sin(dir2 - angle);
+            let vx1=v2*Math.cos(dir2-angle);
+            let vy1=v1*Math.sin(dir1-angle);
+            let vx2=v1*Math.cos(dir1-angle);
+            let vy2=v2*Math.sin(dir2-angle);
 
-            c1.vx = Math.cos(angle)*vx1 - Math.sin(angle)*vy1;
-            c1.vy = Math.sin(angle)*vx1 + Math.cos(angle)*vy1;
-            c2.vx = Math.cos(angle)*vx2 - Math.sin(angle)*vy2;
-            c2.vy = Math.sin(angle)*vx2 + Math.cos(angle)*vy2;
+            c1.vx=Math.cos(angle)*vx1 - Math.sin(angle)*vy1;
+            c1.vy=Math.sin(angle)*vx1 + Math.cos(angle)*vy1;
+            c2.vx=Math.cos(angle)*vx2 - Math.sin(angle)*vy2;
+            c2.vy=Math.sin(angle)*vx2 + Math.cos(angle)*vy2;
 
-            // separate
-            let overlap = (minDist - dist)/2;
-            let sepX = Math.cos(angle)*overlap;
-            let sepY = Math.sin(angle)*overlap;
-            c1.x -= sepX;
-            c1.y -= sepY;
-            c2.x += sepX;
-            c2.y += sepY;
+            let overlap=(minDist-dist)/2;
+            let sepX=Math.cos(angle)*overlap;
+            let sepY=Math.sin(angle)*overlap;
+            c1.x-=sepX; c1.y-=sepY;
+            c2.x+=sepX; c2.y+=sepY;
           }
         }
       }
     }
 
-    // ===================== ANIMATION LOOP =====================
-    function animate() {
+    function animate(){
       requestAnimationFrame(animate);
-      ctx.clearRect(0, 0, width, height);
+      ctx.clearRect(0,0,width,height);
 
-      for (let c of circles) c.update();
+      for(let c of circles){
+        c.update();
+      }
       checkCollisions();
       updatePulses();
 
-      for (let c of circles) c.draw(ctx);
+      for(let c of circles){
+        c.draw(ctx);
+      }
       drawPulses();
-
       updateDebugPanel();
     }
 
-    function updateDebugPanel() {
-      const debugDiv = document.getElementById('debugPanel');
-      if (!debugVisible) {
-        debugDiv.style.display = 'none';
+    function updateDebugPanel(){
+      const debugDiv=document.getElementById('debugPanel');
+      if(!debugVisible){
+        debugDiv.style.display='none';
         return;
       }
-
-      debugDiv.style.display = 'block';
-      let lines = '';
-      circles.forEach((c, i) => {
-        // switch from .wav to .mp3 in track listing
-        let trackDesc = (c.trackIndex < 0) ? 'none' : `${c.trackIndex+1}.mp3`;
-        let vol = (c.audio) ? c.audio.volume.toFixed(2) : 'n/a';
-        lines += `Circle ${i}: track=${trackDesc}, timesPlayed=${c.timesPlayed}, vol=${vol}\n`;
+      debugDiv.style.display='block';
+      let lines='';
+      circles.forEach((c,i)=>{
+        let trackDesc=(c.trackIndex<0)?'none':((c.trackIndex+1)+'.mp3');
+        let vol=(c.audio)? c.audio.volume.toFixed(2):'n/a';
+        lines+=`Circle ${i}: track=${trackDesc}, timesPlayed=${c.timesPlayed}, vol=${vol}\n`;
       });
-      debugDiv.textContent = lines.trim();
+      debugDiv.textContent=lines.trim();
     }
 
-    // ===================== DRAG + PRESS ANIMATION =====================
-    let draggingCircle = null;
-    let dragOffsetX = 0;
-    let dragOffsetY = 0;
-    let lastPointerX = 0;
-    let lastPointerY = 0;
-    let pointerVx = 0;
-    let pointerVy = 0;
-    let didDrag = false;
+    // DRAG + PRESS
+    let draggingCircle=null;
+    let dragOffsetX=0, dragOffsetY=0;
+    let lastPointerX=0, lastPointerY=0;
+    let pointerVx=0, pointerVy=0;
+    let didDrag=false;
 
-    canvas.addEventListener('pointerdown', (e) => {
-      didDrag = false;
-      const rect = canvas.getBoundingClientRect();
-      const px = e.clientX - rect.left;
-      const py = e.clientY - rect.top;
+    const canvasEl=document.getElementById("ambientCanvas");
+    canvasEl.addEventListener('pointerdown',(e)=>{
+      didDrag=false;
+      const rect=canvasEl.getBoundingClientRect();
+      const px=e.clientX-rect.left; 
+      const py=e.clientY-rect.top;
 
-      for (let circle of circles) {
-        let dx = px - circle.x;
-        let dy = py - circle.y;
-        if (Math.sqrt(dx*dx + dy*dy) <= circle.radius) {
-          // Press animation: slightly grow radius
-          circle.isPressed = true;
-          circle.radius = circle.baseRadius*1.1;
+      for(let circle of circles){
+        let dx=px-circle.x, dy=py-circle.y;
+        if(Math.sqrt(dx*dx+dy*dy)<=circle.radius){
+          circle.isPressed=true;
+          circle.radius=circle.baseRadius*1.1;
 
-          draggingCircle = circle;
-          draggingCircle.isDragging = true;
-          dragOffsetX = dx;
-          dragOffsetY = dy;
-          draggingCircle.vx = 0;
-          draggingCircle.vy = 0;
-          lastPointerX = px;
-          lastPointerY = py;
+          draggingCircle=circle;
+          draggingCircle.isDragging=true;
+          dragOffsetX=dx; dragOffsetY=dy;
+          draggingCircle.vx=0; draggingCircle.vy=0;
+          lastPointerX=px; lastPointerY=py;
           break;
         }
       }
     });
+    canvasEl.addEventListener('pointermove',(e)=>{
+      if(!draggingCircle)return;
+      didDrag=true;
+      const rect=canvasEl.getBoundingClientRect();
+      const px=e.clientX-rect.left;
+      const py=e.clientY-rect.top;
 
-    canvas.addEventListener('pointermove', (e) => {
-      if (!draggingCircle) return;
-      didDrag = true;
-      const rect = canvas.getBoundingClientRect();
-      const px = e.clientX - rect.left;
-      const py = e.clientY - rect.top;
+      draggingCircle.x=px-dragOffsetX;
+      draggingCircle.y=py-dragOffsetY;
 
-      draggingCircle.x = px - dragOffsetX;
-      draggingCircle.y = py - dragOffsetY;
-
-      pointerVx = px - lastPointerX;
-      pointerVy = py - lastPointerY;
-      lastPointerX = px;
-      lastPointerY = py;
+      pointerVx=px-lastPointerX;
+      pointerVy=py-lastPointerY;
+      lastPointerX=px; 
+      lastPointerY=py;
     });
-
-    canvas.addEventListener('pointerup', (e) => {
-      if (draggingCircle) {
-        // revert radius
-        draggingCircle.isPressed = false;
-        draggingCircle.radius = draggingCircle.baseRadius;
-
-        // apply inertia
-        draggingCircle.vx = pointerVx*0.2;
-        draggingCircle.vy = pointerVy*0.2;
-        draggingCircle.isDragging = false;
+    canvasEl.addEventListener('pointerup',(e)=>{
+      if(draggingCircle){
+        draggingCircle.isPressed=false;
+        draggingCircle.radius=draggingCircle.baseRadius;
+        draggingCircle.vx=pointerVx*0.2;
+        draggingCircle.vy=pointerVy*0.2;
+        draggingCircle.isDragging=false;
       }
 
-      let clickedCircle = draggingCircle;
-      draggingCircle = null;
+      let clickedCircle=draggingCircle;
+      draggingCircle=null;
 
-      if (!didDrag && clickedCircle) {
-        // a genuine click => toggle
+      if(!didDrag && clickedCircle){
         clickedCircle.toggleVolume();
       }
     });
-
-    canvas.addEventListener('pointercancel', () => {
-      if (draggingCircle) {
-        draggingCircle.isPressed = false;
-        draggingCircle.radius = draggingCircle.baseRadius;
-        draggingCircle.isDragging = false;
+    canvasEl.addEventListener('pointercancel',()=>{
+      if(draggingCircle){
+        draggingCircle.isPressed=false;
+        draggingCircle.radius=draggingCircle.baseRadius;
+        draggingCircle.isDragging=false;
       }
-      draggingCircle = null;
+      draggingCircle=null;
     });
 
-    // ===================== MUTE / RESTART / VOLUME SLIDER =====================
-    const muteBtn = document.getElementById('muteBtn');
-    const restartBtn = document.getElementById('restartBtn');
-    const volumeSlider = document.getElementById('volumeSlider');
+    // MUTE / RESTART / VOLUME
+    const muteBtn=document.getElementById("muteBtn");
+    const restartBtn=document.getElementById("restartBtn");
+    const volumeSlider=document.getElementById("volumeSlider");
 
-    muteBtn.addEventListener('click', () => {
-      isMuted = !isMuted;
-      muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
-      circles.forEach(c => {
-        if (!c.audio) return;
-        if (isMuted) {
-          c.audio.volume = 0;
+    muteBtn.addEventListener('click',()=>{
+      isMuted=!isMuted;
+      muteBtn.textContent=isMuted?'Unmute':'Mute';
+      circles.forEach(c=>{
+        if(!c.audio)return;
+        if(isMuted){
+          c.audio.volume=0;
         } else {
-          if (c.isOn()) {
+          if(c.isOn()){
             c.fadeUp();
           }
         }
       });
     });
-
-    restartBtn.addEventListener('click', () => {
+    restartBtn.addEventListener('click',()=>{
       randomizeCirclePositions();
       separateOverlappingCircles();
-      circles.forEach(c => {
-        c.fillAlpha = 0;
-        c.strokeAlpha = 1;
-        c.isFadingUp = false;
-        c.isFadingDown = false;
-        c.radius = c.baseRadius;
-        c.isPressed = false;
-        if (c.fadeInterval) {
+      circles.forEach(c=>{
+        c.fillAlpha=0; 
+        c.strokeAlpha=1;
+        c.isFadingUp=false; 
+        c.isFadingDown=false;
+        c.radius=c.baseRadius; 
+        c.isPressed=false;
+        if(c.fadeInterval){
           clearInterval(c.fadeInterval);
-          c.fadeInterval = null;
+          c.fadeInterval=null;
         }
-        if (c.audio) {
-          c.audio.currentTime = 0;
-          c.audio.volume = 0;
+        if(c.audio){
+          c.audio.currentTime=0;
+          c.audio.volume=0;
+        }
+      });
+    });
+    volumeSlider.addEventListener('input',()=>{
+      globalVolumeSlider=parseFloat(volumeSlider.value);
+      circles.forEach(c=>{
+        if(c.isOn() && c.audio && !isMuted){
+          c.audio.volume=Math.min(globalVolumeSlider,GLOBAL_VOLUME_CAP);
         }
       });
     });
 
-    volumeSlider.addEventListener('input', () => {
-      globalVolumeSlider = parseFloat(volumeSlider.value);
-      // If circles are on, we want to update their volumes accordingly
-      circles.forEach(c => {
-        if (c.isOn() && c.audio && !isMuted) {
-          // direct set
-          c.audio.volume = Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP);
-        }
-      });
+    // KEYBOARD SHORTCUT FOR DEBUG
+    document.addEventListener('keydown',(e)=>{
+      if(e.key==='d'){
+        debugVisible=!debugVisible;
+      }
     });
 
-    // ===================== MODAL =====================
-    const modalOverlay = document.getElementById('modalOverlay');
-    modalOverlay.addEventListener('click', () => {
-      modalOverlay.style.display = 'none';
+    // PRELOADER MODAL
+    const modalOverlay=document.getElementById("modalOverlay");
+    modalOverlay.addEventListener('click',()=>{
+      if(!loadedAll){
+        // block if not loaded
+        return;
+      }
+      // user proceeds
+      modalOverlay.style.display='none';
 
-      // fade scene 0->1
-      let step = 0;
-      const intv = setInterval(() => {
+      // fade scene alpha=0->1
+      let step=0;
+      const fadeInt=setInterval(()=>{
         step++;
-        globalAlpha = step/30;
-        if (globalAlpha >= 1) {
-          globalAlpha = 1;
-          clearInterval(intv);
+        globalAlpha=step/30;
+        if(globalAlpha>=1){
+          globalAlpha=1; clearInterval(fadeInt);
         }
-      }, 30);
+      },30);
 
-      // only one circle "on"
-      if (circles.length > 0) {
+      // fade up only first circle
+      if(circles.length>0){
         circles[0].fadeUp();
       }
-
-      // attempt play
-      circles.forEach(c => {
-        if (c.audio) {
+      // attempt auto-play
+      circles.forEach(c=>{
+        if(c.audio){
           c.audio.play().catch(()=>{});
         }
       });
     });
 
-    // ===================== KEYBOARD SHORTCUTS (DEBUG) =====================
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'd') {
-        debugVisible = !debugVisible;
+    // MAIN
+    function main(){
+      try{
+        audioContext=new(window.AudioContext||window.webkitAudioContext)();
+      }catch(e){
+        console.warn("No AudioContext");
       }
-    });
 
-    // ===================== STARTUP =====================
-    loadAllAudio().then(() => {
-      createCircles();
-      animate();
-    }).catch((err) => {
-      console.error("Audio load error:", err);
-      createCircles();
-      animate();
-    });
+      if(audioContext){
+        setupMasterChain();
+      }
+
+      loadAllAudio().then(()=>{
+        // done loading
+        createCircles();
+        animate();
+      }).catch(err=>{
+        console.error("Audio load error:",err);
+        // still proceed
+        createCircles();
+        animate();
+      });
+    }
+    main();
   </script>
 </body>
 </html>
