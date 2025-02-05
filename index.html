@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Soundmirror</title>
+
+  <!-- Prevent text auto-scaling on mobile; disable pinch-zoom -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+
+  <!-- Google Silkscreen font -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Silkscreen&display=swap"
+    rel="stylesheet"
+  />
+
+  <style>
+    html, body {
+      margin: 0; 
+      padding: 0;
+      width: 100%; 
+      height: 100%;
+      background: #FAF8F0;
+      overflow: hidden;
+
+      /* Fixed font-size so text doesn't scale on mobile */
+      font-size: 14px;
+    }
+    canvas {
+      display: block;
+      background: transparent;
+    }
+
+    /* Top bar with "Soundmirror" and the controls */
+    .top-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 50px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1rem;
+      font-family: 'Silkscreen', sans-serif;
+      font-size: 14px;
+      color: #1B1B1B;
+      user-select: none;
+      z-index: 10;
+    }
+    .brand {
+      pointer-events: none;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+    }
+    .controls button {
+      margin-left: 1rem;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-family: 'Silkscreen', sans-serif;
+      font-size: 14px;
+      color: #1B1B1B;
+      text-transform: uppercase;
+    }
+    .controls button:hover {
+      text-decoration: underline;
+    }
+
+    /* We remove the "Volume" text around the slider */
+    .controls label {
+      display: none; /* Hides the label entirely */
+    }
+    .controls input[type="range"] {
+  /* Basic styling shared across all browsers */
+  -webkit-appearance: none; /* remove default styling in WebKit */
+  appearance: none;
+  width: 50px;         /* example width: 50px */
+  height: 4px;         /* track height */
+  background: #000;    /* fallback background in some cases */
+  cursor: pointer;
+  margin-left: 0.5rem; /* your existing spacing */
+}
+
+/* For Chrome, Safari, Opera: slider track */
+.controls input[type="range"]::-webkit-slider-runnable-track {
+  background: #000;
+  height: 4px;
+}
+
+/* Slider thumb (the “knob”) for WebKit */
+.controls input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;     /* white thumb */
+  border: 2px solid #000;
+  cursor: pointer;
+  margin-top: -5px;     /* centers the thumb with the track */
+}
+
+/* For Firefox: track */
+.controls input[type="range"]::-moz-range-track {
+  background: #000;
+  height: 4px;
+}
+
+/* For Firefox: thumb */
+.controls input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #000;
+  cursor: pointer;
+}
+
+    /* Modal overlay with frosted glass effect */
+    .modal-overlay {
+      position: absolute;
+      top: 0; 
+      left: 0; 
+      width: 100%; 
+      height: 100%;
+      background: rgba(255,255,255,0.3);
+      backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .modal-content {
+      padding: 20px 30px;
+      background: rgba(255,255,255,0.7);
+      border-radius: 8px;
+      text-align: center;
+      font-family: 'Silkscreen', sans-serif;
+      color: #1B1B1B;
+      cursor: pointer;
+    }
+
+    /* Debug panel, hidden by default, toggled with 'd' key */
+    .debug-panel {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      background: rgba(0,0,0,0.3);
+      color: white;
+      font-family: sans-serif;
+      font-size: 12px;
+      padding: 4px 8px;
+      z-index: 999;
+      max-width: 40%;
+      white-space: pre;
+      display: none; /* hidden by default */
+    }
+  </style>
+</head>
+<body>
+  <!-- Top bar -->
+  <div class="top-bar">
+    <div class="brand">Soundmirror</div>
+    <div class="controls">
+      <button id="restartBtn">Restart</button>
+      <button id="muteBtn">Mute</button>
+      <!-- Hidden label; only the slider remains -->
+      <label><!-- hidden --></label>
+      <input type="range" id="volumeSlider" min="0" max="1" step="0.01" value="1" />
+    </div>
+  </div>
+
+  <!-- Canvas -->
+  <canvas id="ambientCanvas"></canvas>
+
+  <!-- Modal -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal-content" id="modalContent">
+      <p>Audio on.<br/>Tap or click to begin</p>
+    </div>
+  </div>
+
+  <!-- Debug panel -->
+  <div class="debug-panel" id="debugPanel"></div>
+
+  <script>
+    // ===================== GLOBAL / AUDIO POOL SETUP =====================
+    const MAX_TRACKS = 40;  // Up to 40 .mp3 files
+
+    let audioPool = []; // each element: { audio, inUse }
+
+    function loadAllAudio() {
+      const promises = [];
+      for (let i = 0; i < MAX_TRACKS; i++) {
+        promises.push(new Promise((resolve) => {
+          // Switch from .wav to .mp3
+          const audio = new Audio(`music/${i+1}.mp3`);
+          audio.addEventListener('canplaythrough', () => {
+            resolve({ index: i, audio });
+          });
+          audio.addEventListener('error', () => {
+            console.log(`Error loading track #${i+1}`);
+            resolve({ index: i, audio: null });
+          });
+          audio.load();
+        }));
+      }
+      return Promise.all(promises).then(results => {
+        audioPool = new Array(MAX_TRACKS).fill(null).map((_, i) => {
+          const found = results.find(r => r.index === i);
+          return {
+            audio: found?.audio || null,
+            inUse: false,
+          };
+        });
+      });
+    }
+
+    function getRandomFreeTrackIndex() {
+      const freeIndices = [];
+      audioPool.forEach((t, i) => {
+        if (t.audio && !t.inUse) freeIndices.push(i);
+      });
+      if (freeIndices.length === 0) return -1;
+      const rnd = Math.floor(Math.random() * freeIndices.length);
+      return freeIndices[rnd];
+    }
+
+    // ===================== CONFIGURABLE SETTINGS =====================
+    const NUM_CIRCLES            = 9;
+    const FADE_DURATION          = 2000; // ms
+    const FADE_STEPS             = 30;
+    const WIND_INTERVAL          = 5000;
+    const WIND_MAX_SPEED         = 0.2;
+    const COLLISION_PULSE_RADIUS_SPEED = 1.5;
+    const COLLISION_PULSE_ALPHA_DECAY  = 0.02;
+    const MAX_SPEED              = 2.5;
+    const LOOP_CROSSFADE         = 1.0; // seconds for crossfade
+    const GLOBAL_VOLUME_CAP      = 0.9; // never exceed 0.9 to prevent clipping
+
+    // We'll fade scene from alpha=0 -> 1 after user clicks
+    let globalAlpha = 0;
+
+    // Mute toggle
+    let isMuted = false;
+    // Overall volume slider [0..1], we clamp at 0.9
+    let globalVolumeSlider = 1.0;
+
+    // Hide debug panel by default, toggle with 'd'
+    let debugVisible = false;
+
+    // For color crossfade
+    const COLOR_FILL   = { r: 200, g: 175, b: 53 }; // #C8AF35
+    const COLOR_STROKE = '#1B1B1B';
+
+    // ===================== CANVAS SETUP =====================
+    const canvas = document.getElementById('ambientCanvas');
+    const ctx = canvas.getContext('2d');
+    let width, height;
+
+    function resizeCanvas() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // ===================== PULSE ANIMATION (COLLISIONS) =====================
+    let pulses = [];
+    function createPulse(x, y) {
+      pulses.push({ x, y, radius: 0, alpha: 0.6 });
+    }
+    function updatePulses() {
+      for (let i = pulses.length - 1; i >= 0; i--) {
+        const p = pulses[i];
+        p.radius += COLLISION_PULSE_RADIUS_SPEED;
+        p.alpha -= COLLISION_PULSE_ALPHA_DECAY;
+        if (p.alpha <= 0) pulses.splice(i, 1);
+      }
+    }
+    function drawPulses() {
+      for (let p of pulses) {
+        ctx.save();
+        ctx.globalAlpha = p.alpha * globalAlpha;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI*2);
+        ctx.strokeStyle = COLOR_STROKE;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // ===================== WIND (RANDOM DRIFT) =====================
+    let wind = { vx: 0, vy: 0 };
+    function setRandomWind() {
+      wind.vx = (Math.random() - 0.5)*WIND_MAX_SPEED*2;
+      wind.vy = (Math.random() - 0.5)*WIND_MAX_SPEED*2;
+    }
+    setRandomWind();
+    setInterval(setRandomWind, WIND_INTERVAL);
+
+    // ===================== CIRCLE CLASS =====================
+    class Circle {
+      constructor(index) {
+        this.index = index; // so we can show circle # in debug
+        const minDim = Math.min(width, height);
+        this.baseRadius = minDim * 0.06; // normal radius
+        this.radius = this.baseRadius;
+
+        this.x = 0;
+        this.y = 0;
+        this.vx = (Math.random() - 0.5)*0.4;
+        this.vy = (Math.random() - 0.5)*0.4;
+
+        this.isDragging = false;
+        this.isPressed = false; // pointer down on this circle
+
+        // Crossfade states
+        this.fillAlpha   = 0; // 0 => off, 1 => on
+        this.strokeAlpha = 1;
+        this.isFadingUp   = false;
+        this.isFadingDown = false;
+        this.fadeInterval = null;
+
+        // Audio
+        this.trackIndex   = -1;
+        this.audio        = null;
+        this.timesToPlay  = 1;  // random 1..5
+        this.timesPlayed  = 0;  // how many times user turned this circle on
+
+        // For loop crossfading
+        this.loopCrossfading = false;
+      }
+
+      setTrack(trackIndex) {
+        this.releaseTrack();
+
+        this.trackIndex = trackIndex;
+        audioPool[trackIndex].inUse = true;
+        this.audio = audioPool[trackIndex].audio;
+        if (!this.audio) return; // might be null if file didn't load
+
+        // pick random times 1..5
+        this.timesToPlay = Math.floor(Math.random()*5) + 1;
+        this.timesPlayed = 0; // reset usage count
+
+        this.audio.loop = false;
+        this.audio.currentTime = 0;
+        this.audio.volume = 0;
+
+        // fade out near end if circle is on
+        this.audio.ontimeupdate = () => {
+          if (!this.audio || !this.isOn()) return;
+          const remain = this.audio.duration - this.audio.currentTime;
+          if (remain <= LOOP_CROSSFADE && !this.loopCrossfading) {
+            this.startLoopFadeOut();
+          }
+        };
+        // crossfade in next loop
+        this.audio.onended = () => {
+          this.loopCrossfading = false;
+          // If still on => fade in from start
+          if (this.isOn() && !isMuted) {
+            this.audio.currentTime = 0;
+            this.startLoopFadeIn();
+            this.audio.play().catch(()=>{});
+          } else {
+            // do nothing
+            this.audio.currentTime = 0;
+            this.audio.volume = 0;
+          }
+        };
+      }
+
+      releaseTrack() {
+        if (this.trackIndex >= 0) {
+          audioPool[this.trackIndex].inUse = false;
+        }
+        this.trackIndex = -1;
+        if (this.audio) {
+          this.audio.ontimeupdate = null;
+          this.audio.onended = null;
+        }
+        this.audio = null;
+      }
+
+      pickRandomTrack() {
+        const idx = getRandomFreeTrackIndex();
+        if (idx < 0) {
+          console.warn("No free tracks available!");
+          return;
+        }
+        this.setTrack(idx);
+      }
+
+      // Called each time we near track end while isOn()
+      startLoopFadeOut() {
+        this.loopCrossfading = true;
+        if (!this.audio) return;
+        const startVol = this.audio.volume;
+        const endVol = 0;
+        const steps = 20;
+        const stepTime = (LOOP_CROSSFADE * 1000)/steps;
+
+        let count = 0;
+        const intv = setInterval(() => {
+          count++;
+          const r = count/steps;
+          let newVol = startVol + (endVol - startVol)*r;
+          newVol = Math.min(newVol, GLOBAL_VOLUME_CAP); // clamp
+          newVol = Math.min(newVol, globalVolumeSlider); 
+          this.audio.volume = Math.max(0, newVol);
+          if (count >= steps) clearInterval(intv);
+        }, stepTime);
+      }
+
+      // Called if track ended but circle is still "on"
+      startLoopFadeIn() {
+        if (!this.audio) return;
+        const startVol = 0;
+        const endVol = (isMuted ? 0 : Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP));
+        const steps = 20;
+        const stepTime = (LOOP_CROSSFADE * 1000)/steps;
+
+        let count = 0;
+        const intv = setInterval(() => {
+          count++;
+          const r = count/steps;
+          let newVol = startVol + (endVol - startVol)*r;
+          this.audio.volume = Math.max(0, Math.min(newVol, 1));
+          if (count >= steps) clearInterval(intv);
+        }, stepTime);
+      }
+
+      isOn() {
+        return this.fillAlpha > 0.5;
+      }
+
+      // If user toggles circle from off->on, we increment timesPlayed
+      incrementPlays() {
+        this.timesPlayed++;
+        if (this.timesPlayed >= this.timesToPlay) {
+          // pick new track
+          this.pickRandomTrack();
+        }
+      }
+
+      update() {
+        if (!this.isDragging) {
+          this.vx += wind.vx * 0.01;
+          this.vy += wind.vy * 0.01;
+        }
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // limit speed
+        const spd = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+        if (spd > MAX_SPEED) {
+          const ratio = MAX_SPEED/spd;
+          this.vx *= ratio;
+          this.vy *= ratio;
+        }
+
+        this.checkEdges();
+      }
+
+      draw(ctx) {
+        ctx.save();
+        ctx.globalAlpha = globalAlpha;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
+
+        // stroke
+        if (this.strokeAlpha > 0) {
+          ctx.save();
+          ctx.globalAlpha *= this.strokeAlpha;
+          ctx.lineWidth = 4;
+          ctx.strokeStyle = COLOR_STROKE;
+          ctx.stroke();
+          ctx.restore();
+        }
+        // fill
+        if (this.fillAlpha > 0) {
+          ctx.save();
+          ctx.globalAlpha *= this.fillAlpha;
+          ctx.fillStyle = `rgb(${COLOR_FILL.r}, ${COLOR_FILL.g}, ${COLOR_FILL.b})`;
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // If debug is visible, show circle index
+        if (debugVisible) {
+          ctx.save();
+          ctx.fillStyle = "#000";
+          ctx.font = "16px sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(this.index.toString(), this.x, this.y);
+          ctx.restore();
+        }
+
+        ctx.restore();
+      }
+
+      checkEdges() {
+        let collided = false;
+        if (this.x - this.radius < 0) {
+          this.x = this.radius;
+          this.vx *= -1;
+          collided = true;
+        } else if (this.x + this.radius > width) {
+          this.x = width - this.radius;
+          this.vx *= -1;
+          collided = true;
+        }
+        if (this.y - this.radius < 0) {
+          this.y = this.radius;
+          this.vy *= -1;
+          collided = true;
+        } else if (this.y + this.radius > height) {
+          this.y = height - this.radius;
+          this.vy *= -1;
+          collided = true;
+        }
+        if (collided) {
+          this.toggleVolume();
+        }
+      }
+
+      toggleVolume() {
+        if (this.fillAlpha < 0.5) this.fadeUp();
+        else this.fadeDown();
+      }
+
+      fadeUp() {
+        if (!this.audio) return;
+        if (this.isFadingUp) return;
+        this.isFadingUp = true;
+        this.isFadingDown = false;
+
+        if (this.fadeInterval) {
+          clearInterval(this.fadeInterval);
+          this.fadeInterval = null;
+        }
+
+        // We count this as a "play"
+        this.incrementPlays();
+
+        let startVol   = this.audio.volume;
+        let endVol     = (isMuted ? 0 : Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP));
+        let startFill  = this.fillAlpha;
+        let endFill    = 1;
+        let startStroke= this.strokeAlpha;
+        let endStroke  = 0;
+
+        const total = FADE_STEPS;
+        const stepTime = FADE_DURATION/total;
+        let step = 0;
+
+        this.audio.play().catch(()=>{});
+
+        this.fadeInterval = setInterval(() => {
+          step++;
+          const r = step/total;
+          let newVol = startVol + (endVol - startVol)*r;
+          newVol = Math.min(newVol, 1);
+          this.audio.volume = newVol;
+
+          this.fillAlpha = startFill + (endFill - startFill)*r;
+          this.strokeAlpha = startStroke + (endStroke - startStroke)*r;
+
+          if (step >= total) {
+            clearInterval(this.fadeInterval);
+            this.fadeInterval = null;
+            this.isFadingUp = false;
+          }
+        }, stepTime);
+      }
+
+      fadeDown() {
+        if (!this.audio) return;
+        if (this.isFadingDown) return;
+        this.isFadingUp = false;
+        this.isFadingDown = true;
+
+        if (this.fadeInterval) {
+          clearInterval(this.fadeInterval);
+          this.fadeInterval = null;
+        }
+
+        let startVol   = this.audio.volume;
+        let endVol     = 0;
+        let startFill  = this.fillAlpha;
+        let endFill    = 0;
+        let startStroke= this.strokeAlpha;
+        let endStroke  = 1;
+
+        const total = FADE_STEPS;
+        const stepTime = FADE_DURATION/total;
+        let step = 0;
+
+        this.fadeInterval = setInterval(() => {
+          step++;
+          const r = step/total;
+          let newVol = startVol + (endVol - startVol)*r;
+          this.audio.volume = Math.max(0, Math.min(newVol, 1));
+
+          this.fillAlpha = startFill + (endFill - startFill)*r;
+          this.strokeAlpha = startStroke + (endStroke - startStroke)*r;
+
+          if (step >= total) {
+            clearInterval(this.fadeInterval);
+            this.fadeInterval = null;
+            this.isFadingDown = false;
+          }
+        }, stepTime);
+      }
+    } // end Circle
+
+    // ===================== GLOBAL CIRCLES ARRAY =====================
+    let circles = [];
+
+    function createCircles() {
+      circles = [];
+      for (let i = 0; i < NUM_CIRCLES; i++) {
+        const c = new Circle(i);
+        circles.push(c);
+      }
+      randomizeCirclePositions();
+      separateOverlappingCircles();
+
+      // Assign random track to each circle
+      circles.forEach(circle => {
+        const idx = getRandomFreeTrackIndex();
+        if (idx < 0) {
+          console.warn("No free track for circle!");
+          return;
+        }
+        circle.setTrack(idx);
+      });
+    }
+
+    function randomizeCirclePositions() {
+      for (let c of circles) {
+        c.x = Math.random()*(width - 2*c.baseRadius) + c.baseRadius;
+        c.y = Math.random()*(height - 2*c.baseRadius) + c.baseRadius;
+        c.vx = (Math.random() - 0.5)*0.4;
+        c.vy = (Math.random() - 0.5)*0.4;
+      }
+    }
+
+    function separateOverlappingCircles() {
+      let overlapping = true;
+      let safetyCounter = 0;
+      while (overlapping && safetyCounter < 1000) {
+        overlapping = false;
+        for (let i = 0; i < circles.length; i++) {
+          for (let j = i+1; j < circles.length; j++) {
+            let c1 = circles[i];
+            let c2 = circles[j];
+            let dx = c2.x - c1.x;
+            let dy = c2.y - c1.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < c1.radius + c2.radius) {
+              overlapping = true;
+              c2.x = Math.random()*(width - 2*c2.baseRadius) + c2.baseRadius;
+              c2.y = Math.random()*(height - 2*c2.baseRadius) + c2.baseRadius;
+            }
+          }
+        }
+        safetyCounter++;
+      }
+    }
+
+    // ===================== COLLISION DETECTION =====================
+    function checkCollisions() {
+      for (let i = 0; i < circles.length; i++) {
+        for (let j = i+1; j < circles.length; j++) {
+          let c1 = circles[i];
+          let c2 = circles[j];
+          let dx = c2.x - c1.x;
+          let dy = c2.y - c1.y;
+          let dist = Math.sqrt(dx*dx + dy*dy);
+          let minDist = c1.radius + c2.radius;
+          if (dist < minDist) {
+            // toggle each
+            c1.toggleVolume();
+            c2.toggleVolume();
+
+            // pulse
+            const midX = c1.x + dx/2;
+            const midY = c1.y + dy/2;
+            createPulse(midX, midY);
+
+            // basic elastic
+            let angle = Math.atan2(dy, dx);
+            let v1 = Math.sqrt(c1.vx*c1.vx + c1.vy*c1.vy);
+            let v2 = Math.sqrt(c2.vx*c2.vx + c2.vy*c2.vy);
+            let dir1 = Math.atan2(c1.vy, c1.vx);
+            let dir2 = Math.atan2(c2.vy, c2.vx);
+
+            let vx1 = v2*Math.cos(dir2 - angle);
+            let vy1 = v1*Math.sin(dir1 - angle);
+            let vx2 = v1*Math.cos(dir1 - angle);
+            let vy2 = v2*Math.sin(dir2 - angle);
+
+            c1.vx = Math.cos(angle)*vx1 - Math.sin(angle)*vy1;
+            c1.vy = Math.sin(angle)*vx1 + Math.cos(angle)*vy1;
+            c2.vx = Math.cos(angle)*vx2 - Math.sin(angle)*vy2;
+            c2.vy = Math.sin(angle)*vx2 + Math.cos(angle)*vy2;
+
+            // separate
+            let overlap = (minDist - dist)/2;
+            let sepX = Math.cos(angle)*overlap;
+            let sepY = Math.sin(angle)*overlap;
+            c1.x -= sepX;
+            c1.y -= sepY;
+            c2.x += sepX;
+            c2.y += sepY;
+          }
+        }
+      }
+    }
+
+    // ===================== ANIMATION LOOP =====================
+    function animate() {
+      requestAnimationFrame(animate);
+      ctx.clearRect(0, 0, width, height);
+
+      for (let c of circles) c.update();
+      checkCollisions();
+      updatePulses();
+
+      for (let c of circles) c.draw(ctx);
+      drawPulses();
+
+      updateDebugPanel();
+    }
+
+    function updateDebugPanel() {
+      const debugDiv = document.getElementById('debugPanel');
+      if (!debugVisible) {
+        debugDiv.style.display = 'none';
+        return;
+      }
+
+      debugDiv.style.display = 'block';
+      let lines = '';
+      circles.forEach((c, i) => {
+        // switch from .wav to .mp3 in track listing
+        let trackDesc = (c.trackIndex < 0) ? 'none' : `${c.trackIndex+1}.mp3`;
+        let vol = (c.audio) ? c.audio.volume.toFixed(2) : 'n/a';
+        lines += `Circle ${i}: track=${trackDesc}, timesPlayed=${c.timesPlayed}, vol=${vol}\n`;
+      });
+      debugDiv.textContent = lines.trim();
+    }
+
+    // ===================== DRAG + PRESS ANIMATION =====================
+    let draggingCircle = null;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+    let lastPointerX = 0;
+    let lastPointerY = 0;
+    let pointerVx = 0;
+    let pointerVy = 0;
+    let didDrag = false;
+
+    canvas.addEventListener('pointerdown', (e) => {
+      didDrag = false;
+      const rect = canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+
+      for (let circle of circles) {
+        let dx = px - circle.x;
+        let dy = py - circle.y;
+        if (Math.sqrt(dx*dx + dy*dy) <= circle.radius) {
+          // Press animation: slightly grow radius
+          circle.isPressed = true;
+          circle.radius = circle.baseRadius*1.1;
+
+          draggingCircle = circle;
+          draggingCircle.isDragging = true;
+          dragOffsetX = dx;
+          dragOffsetY = dy;
+          draggingCircle.vx = 0;
+          draggingCircle.vy = 0;
+          lastPointerX = px;
+          lastPointerY = py;
+          break;
+        }
+      }
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!draggingCircle) return;
+      didDrag = true;
+      const rect = canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+
+      draggingCircle.x = px - dragOffsetX;
+      draggingCircle.y = py - dragOffsetY;
+
+      pointerVx = px - lastPointerX;
+      pointerVy = py - lastPointerY;
+      lastPointerX = px;
+      lastPointerY = py;
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+      if (draggingCircle) {
+        // revert radius
+        draggingCircle.isPressed = false;
+        draggingCircle.radius = draggingCircle.baseRadius;
+
+        // apply inertia
+        draggingCircle.vx = pointerVx*0.2;
+        draggingCircle.vy = pointerVy*0.2;
+        draggingCircle.isDragging = false;
+      }
+
+      let clickedCircle = draggingCircle;
+      draggingCircle = null;
+
+      if (!didDrag && clickedCircle) {
+        // a genuine click => toggle
+        clickedCircle.toggleVolume();
+      }
+    });
+
+    canvas.addEventListener('pointercancel', () => {
+      if (draggingCircle) {
+        draggingCircle.isPressed = false;
+        draggingCircle.radius = draggingCircle.baseRadius;
+        draggingCircle.isDragging = false;
+      }
+      draggingCircle = null;
+    });
+
+    // ===================== MUTE / RESTART / VOLUME SLIDER =====================
+    const muteBtn = document.getElementById('muteBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const volumeSlider = document.getElementById('volumeSlider');
+
+    muteBtn.addEventListener('click', () => {
+      isMuted = !isMuted;
+      muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+      circles.forEach(c => {
+        if (!c.audio) return;
+        if (isMuted) {
+          c.audio.volume = 0;
+        } else {
+          if (c.isOn()) {
+            c.fadeUp();
+          }
+        }
+      });
+    });
+
+    restartBtn.addEventListener('click', () => {
+      randomizeCirclePositions();
+      separateOverlappingCircles();
+      circles.forEach(c => {
+        c.fillAlpha = 0;
+        c.strokeAlpha = 1;
+        c.isFadingUp = false;
+        c.isFadingDown = false;
+        c.radius = c.baseRadius;
+        c.isPressed = false;
+        if (c.fadeInterval) {
+          clearInterval(c.fadeInterval);
+          c.fadeInterval = null;
+        }
+        if (c.audio) {
+          c.audio.currentTime = 0;
+          c.audio.volume = 0;
+        }
+      });
+    });
+
+    volumeSlider.addEventListener('input', () => {
+      globalVolumeSlider = parseFloat(volumeSlider.value);
+      // If circles are on, we want to update their volumes accordingly
+      circles.forEach(c => {
+        if (c.isOn() && c.audio && !isMuted) {
+          // direct set
+          c.audio.volume = Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP);
+        }
+      });
+    });
+
+    // ===================== MODAL =====================
+    const modalOverlay = document.getElementById('modalOverlay');
+    modalOverlay.addEventListener('click', () => {
+      modalOverlay.style.display = 'none';
+
+      // fade scene 0->1
+      let step = 0;
+      const intv = setInterval(() => {
+        step++;
+        globalAlpha = step/30;
+        if (globalAlpha >= 1) {
+          globalAlpha = 1;
+          clearInterval(intv);
+        }
+      }, 30);
+
+      // only one circle "on"
+      if (circles.length > 0) {
+        circles[0].fadeUp();
+      }
+
+      // attempt play
+      circles.forEach(c => {
+        if (c.audio) {
+          c.audio.play().catch(()=>{});
+        }
+      });
+    });
+
+    // ===================== KEYBOARD SHORTCUTS (DEBUG) =====================
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'd') {
+        debugVisible = !debugVisible;
+      }
+    });
+
+    // ===================== STARTUP =====================
+    loadAllAudio().then(() => {
+      createCircles();
+      animate();
+    }).catch((err) => {
+      console.error("Audio load error:", err);
+      createCircles();
+      animate();
+    });
+  </script>
+</body>
+</html>
