@@ -856,6 +856,15 @@
         // block if not loaded
         return;
       }
+
+      // Force resume if audioContext is suspended
+  if (audioContext && audioContext.state === 'suspended') {
+    audioContext.resume().catch(err => console.log("Resume error:", err));
+  } else {
+    console.log("Force play resume");
+
+  }
+
       // user proceeds
       modalOverlay.style.display='none';
 
