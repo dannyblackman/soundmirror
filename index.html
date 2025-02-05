@@ -799,20 +799,47 @@
     const restartBtn=document.getElementById("restartBtn");
     const volumeSlider=document.getElementById("volumeSlider");
 
-    muteBtn.addEventListener('click',()=>{
-      isMuted=!isMuted;
-      muteBtn.textContent=isMuted?'Unmute':'Mute';
-      circles.forEach(c=>{
-        if(!c.audio)return;
-        if(isMuted){
-          c.audio.volume=0;
-        } else {
-          if(c.isOn()){
-            c.fadeUp();
-          }
-        }
-      });
-    });
+    muteBtn.addEventListener('click', () => {
+  isMuted = !isMuted;
+  muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+
+  circles.forEach(c => {
+    if (!c.audio) return;
+
+    // 1) Cancel any ongoing fade interval
+    if (c.fadeInterval) {
+      clearInterval(c.fadeInterval);
+      c.fadeInterval = null;
+      c.isFadingUp = false;
+      c.isFadingDown = false;
+    }
+
+    // 2) Immediately set volume
+    if (isMuted) {
+      c.audio.volume = 0;
+
+      // If you also want the visual state to jump to “off,” do this:
+      // c.fillAlpha = 0;
+      // c.strokeAlpha = 1;
+
+    } else {
+      // If circle is “on,” set volume = globalVolume
+      if (c.isOn()) {
+        c.audio.volume = Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP);
+
+        // Optionally, also ensure fillAlpha is 1:
+        // c.fillAlpha = 1;
+        // c.strokeAlpha = 0;
+
+      } else {
+        // It's off => remain off visually & volume=0
+        c.audio.volume = 0;
+      }
+    }
+  });
+});
+
+
     restartBtn.addEventListener('click',()=>{
       randomizeCirclePositions();
       separateOverlappingCircles();
@@ -833,13 +860,29 @@
         }
       });
     });
-    volumeSlider.addEventListener('input',()=>{
-      globalVolumeSlider=parseFloat(volumeSlider.value);
-      circles.forEach(c=>{
-        if(c.isOn() && c.audio && !isMuted){
-          c.audio.volume=Math.min(globalVolumeSlider,GLOBAL_VOLUME_CAP);
-        }
-      });
+    volumeSlider.addEventListener("input", () => {
+        globalVolumeSlider = parseFloat(volumeSlider.value);
+
+        circles.forEach(c => {
+            if (!c.audio) return;
+
+            // 1) Cancel any ongoing fade intervals
+            if (c.fadeInterval) {
+            clearInterval(c.fadeInterval);
+            c.fadeInterval = null;
+            c.isFadingUp = false;
+            c.isFadingDown = false;
+            }
+
+            // 2) Immediately set volume based on whether circle is "on"
+            if (c.isOn() && !isMuted) {
+            // Force new volume
+            c.audio.volume = Math.min(globalVolumeSlider, GLOBAL_VOLUME_CAP);
+            } else {
+            // If circle isn't "on" or is muted => ensure volume=0
+            c.audio.volume = 0;
+            }
+        });
     });
 
     // KEYBOARD SHORTCUT FOR DEBUG
